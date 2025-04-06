@@ -1,5 +1,6 @@
 import os
 import time
+import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,17 +25,16 @@ class NYUDepthDataset(Dataset):
         
         # Load dataset paths
         split = 'train' if is_train else 'test'
-        rgb_dir = os.path.join(root_dir, 'rgb', split)
-        depth_dir = os.path.join(root_dir, 'depth', split)
+        df = pd.read_csv(f"{root_dir}/data/nyu2_{split}.csv")
+        # rgb_dir = os.path.join(root_dir, df, split)
+        # depth_dir = os.path.join(root_dir, 'depth', split)
         
-        for file_name in os.listdir(rgb_dir):
-            if file_name.endswith('.png') or file_name.endswith('.jpg'):
-                rgb_path = os.path.join(rgb_dir, file_name)
-                depth_path = os.path.join(depth_dir, file_name)
-                
-                if os.path.exists(depth_path):
-                    self.rgb_paths.append(rgb_path)
-                    self.depth_paths.append(depth_path)
+        for index, row in df.iterrows():
+            rgb_path = f"{root_dir}/{row[0]}"
+            depth_path = f"{root_dir}/{row[1]}"
+            if os.path.exists(depth_path):
+                self.rgb_paths.append(rgb_path)
+                self.depth_paths.append(depth_path)
 
     def __len__(self):
         return len(self.rgb_paths)
@@ -106,6 +106,9 @@ class DepthLoss(nn.Module):
 def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10, save_dir='./models'):
     os.makedirs(save_dir, exist_ok=True)
     best_loss = float('inf')
+
+    train_losses = []
+    val_losses = []
     
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}')
@@ -113,12 +116,13 @@ def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10,
         
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
+            running_loss = 0.0
+
             if phase == 'train':
                 model.train()
             else:
                 model.eval()
             
-            running_loss = 0.0
             
             # Iterate over data
             for inputs, targets in tqdm(dataloaders[phase]):
@@ -149,10 +153,15 @@ def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10,
                 best_loss = epoch_loss
                 torch.save(model.state_dict(), os.path.join(save_dir, 'best_model.pth'))
                 print(f'Saved best model with loss {best_loss:.4f}')
+
+            if phase == 'train':
+                train_losses.append(epoch_loss)
+            else:
+                val_losses.append(epoch_loss)
         
         print()
     
-    return model
+    return model, train_losses, val_losses
 
 # Visualization function
 def visualize_results(model, dataloader, device, num_samples=5):
@@ -179,6 +188,7 @@ def visualize_results(model, dataloader, device, num_samples=5):
             
             plt.subplot(1, 3, 1)
             plt.title('Input RGB')
+            input_np = cv2.cvtColor(input_np, cv2.COLOR_BGR2RGB)
             plt.imshow(input_np)
             plt.axis('off')
             
@@ -204,11 +214,11 @@ def main():
     
     # Configuration
     config = {
-        'dataset_path': './data/nyu',
-        'batch_size': 8,
+        'dataset_path': '/projectnb/dl4ds/materials/datasets/monocular-depth-estimation/nyuv2/nyu_data',
+        'batch_size': 64,
         'num_workers': 4,
         'learning_rate': 1e-4,
-        'num_epochs': 10,
+        'num_epochs': 50,
         'input_size': (256, 256),
         'save_dir': './models',
     }
@@ -259,7 +269,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
     # Train the model
-    model = train_model(
+    model, train_losses, val_losses = train_model(
         model=model,
         dataloaders=dataloaders,
         criterion=criterion,
@@ -271,6 +281,16 @@ def main():
     
     # Visualize results
     visualize_results(model, val_loader, device)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss Over Time')
+    plt.legend()
+    plt.savefig('loss_history.png')
+    plt.close()
 
 if __name__ == '__main__':
     main()
