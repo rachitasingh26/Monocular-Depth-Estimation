@@ -5,7 +5,5 @@
 - The `train.py` and `models/models.py` contains code for our proposed work based on a Teacher-Student architecture.
 - Our baseline model overfits pretty early since a pretrained ResNet encoder is being used.
 - The graph below shows that the validation loss is pretty much constant and the train loss also plateaus after a few epochs.
-\centering
-\includegraphics[width=0.9\linewidth]{images/result2.png}
-\caption{Results from the baseline model (U-Net architecture) after 50 epochs (Left to Right: Input RGB, Ground Truth, Predicted Depth)}
-\label{fig:enter-label}
+![image](https://github.com/user-attachments/assets/f515b828-079c-454a-a54f-dd5c593594a9)
+
