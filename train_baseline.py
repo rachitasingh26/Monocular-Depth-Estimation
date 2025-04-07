@@ -181,7 +181,7 @@ def visualize_results(model, dataloader, device, num_samples=5):
             output_np = outputs[0, 0].cpu().numpy()
             
             # Create figure
-            plt.figure(figsize=(15, 5))
+            plt.figure(figsize=(16, 6))
             
             plt.subplot(1, 3, 1)
             plt.title('Input RGB')
@@ -265,15 +265,15 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
     # Train the model
-    # model, train_losses, val_losses = train_model(
-    #     model=model,
-    #     dataloaders=dataloaders,
-    #     criterion=criterion,
-    #     optimizer=optimizer,
-    #     device=device,
-    #     num_epochs=config['num_epochs'],
-    #     save_dir=config['save_dir']
-    # )
+    model, train_losses, val_losses = train_model(
+        model=model,
+        dataloaders=dataloaders,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        num_epochs=config['num_epochs'],
+        save_dir=config['save_dir']
+    )
 
     state_dict = torch.load('models/best_model.pth', map_location=device)
     model.load_state_dict(state_dict, strict=False)
