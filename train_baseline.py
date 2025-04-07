@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageOps
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import cv2
@@ -65,7 +65,7 @@ class NYUDepthDataset(Dataset):
         rgb_tensor = torch.from_numpy(rgb_np.transpose(2, 0, 1)).float()
         depth_tensor = torch.from_numpy(depth_np).unsqueeze(0).float()
         
-        return rgb_tensor, depth_tensor
+        return rgb_tensor, depth_tensor, rgb_np
 
 # Simple transforms
 class SimpleTransform:
@@ -168,7 +168,7 @@ def visualize_results(model, dataloader, device, num_samples=5):
     model.eval()
     
     with torch.no_grad():
-        for i, (inputs, targets) in enumerate(dataloader):
+        for i, (inputs, targets, rgb_np) in enumerate(dataloader):
             if i >= num_samples:
                 break
                 
@@ -176,20 +176,16 @@ def visualize_results(model, dataloader, device, num_samples=5):
             outputs = model(inputs)
             
             # Convert tensors to numpy for visualization
-            input_np = inputs[0].cpu().permute(1, 2, 0).numpy()
+            rgb_np = rgb_np[0].cpu()
             target_np = targets[0, 0].cpu().numpy()
             output_np = outputs[0, 0].cpu().numpy()
-            
-            # Normalize for visualization
-            input_np = (input_np * 255).astype(np.uint8)
             
             # Create figure
             plt.figure(figsize=(15, 5))
             
             plt.subplot(1, 3, 1)
             plt.title('Input RGB')
-            input_np = cv2.cvtColor(input_np, cv2.COLOR_BGR2RGB)
-            plt.imshow(input_np)
+            plt.imshow(rgb_np)
             plt.axis('off')
             
             plt.subplot(1, 3, 2)
@@ -269,15 +265,19 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
     # Train the model
-    model, train_losses, val_losses = train_model(
-        model=model,
-        dataloaders=dataloaders,
-        criterion=criterion,
-        optimizer=optimizer,
-        device=device,
-        num_epochs=config['num_epochs'],
-        save_dir=config['save_dir']
-    )
+    # model, train_losses, val_losses = train_model(
+    #     model=model,
+    #     dataloaders=dataloaders,
+    #     criterion=criterion,
+    #     optimizer=optimizer,
+    #     device=device,
+    #     num_epochs=config['num_epochs'],
+    #     save_dir=config['save_dir']
+    # )
+
+    state_dict = torch.load('models/best_model.pth', map_location=device)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
     
     # Visualize results
     visualize_results(model, val_loader, device)
