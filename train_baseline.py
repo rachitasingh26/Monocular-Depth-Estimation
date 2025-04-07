@@ -1,5 +1,6 @@
 import os
 import time
+import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,7 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageOps
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import cv2
@@ -24,17 +25,16 @@ class NYUDepthDataset(Dataset):
         
         # Load dataset paths
         split = 'train' if is_train else 'test'
-        rgb_dir = os.path.join(root_dir, 'rgb', split)
-        depth_dir = os.path.join(root_dir, 'depth', split)
+        df = pd.read_csv(f"{root_dir}/data/nyu2_{split}.csv")
+        # rgb_dir = os.path.join(root_dir, df, split)
+        # depth_dir = os.path.join(root_dir, 'depth', split)
         
-        for file_name in os.listdir(rgb_dir):
-            if file_name.endswith('.png') or file_name.endswith('.jpg'):
-                rgb_path = os.path.join(rgb_dir, file_name)
-                depth_path = os.path.join(depth_dir, file_name)
-                
-                if os.path.exists(depth_path):
-                    self.rgb_paths.append(rgb_path)
-                    self.depth_paths.append(depth_path)
+        for index, row in df.iterrows():
+            rgb_path = f"{root_dir}/{row[0]}"
+            depth_path = f"{root_dir}/{row[1]}"
+            if os.path.exists(depth_path):
+                self.rgb_paths.append(rgb_path)
+                self.depth_paths.append(depth_path)
 
     def __len__(self):
         return len(self.rgb_paths)
@@ -65,7 +65,7 @@ class NYUDepthDataset(Dataset):
         rgb_tensor = torch.from_numpy(rgb_np.transpose(2, 0, 1)).float()
         depth_tensor = torch.from_numpy(depth_np).unsqueeze(0).float()
         
-        return rgb_tensor, depth_tensor
+        return rgb_tensor, depth_tensor, rgb_np
 
 # Simple transforms
 class SimpleTransform:
@@ -106,6 +106,9 @@ class DepthLoss(nn.Module):
 def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10, save_dir='./models'):
     os.makedirs(save_dir, exist_ok=True)
     best_loss = float('inf')
+
+    train_losses = []
+    val_losses = []
     
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}')
@@ -113,12 +116,13 @@ def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10,
         
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
+            running_loss = 0.0
+
             if phase == 'train':
                 model.train()
             else:
                 model.eval()
             
-            running_loss = 0.0
             
             # Iterate over data
             for inputs, targets in tqdm(dataloaders[phase]):
@@ -149,17 +153,22 @@ def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10,
                 best_loss = epoch_loss
                 torch.save(model.state_dict(), os.path.join(save_dir, 'best_model.pth'))
                 print(f'Saved best model with loss {best_loss:.4f}')
+
+            if phase == 'train':
+                train_losses.append(epoch_loss)
+            else:
+                val_losses.append(epoch_loss)
         
         print()
     
-    return model
+    return model, train_losses, val_losses
 
 # Visualization function
 def visualize_results(model, dataloader, device, num_samples=5):
     model.eval()
     
     with torch.no_grad():
-        for i, (inputs, targets) in enumerate(dataloader):
+        for i, (inputs, targets, rgb_np) in enumerate(dataloader):
             if i >= num_samples:
                 break
                 
@@ -167,19 +176,16 @@ def visualize_results(model, dataloader, device, num_samples=5):
             outputs = model(inputs)
             
             # Convert tensors to numpy for visualization
-            input_np = inputs[0].cpu().permute(1, 2, 0).numpy()
+            rgb_np = rgb_np[0].cpu()
             target_np = targets[0, 0].cpu().numpy()
             output_np = outputs[0, 0].cpu().numpy()
             
-            # Normalize for visualization
-            input_np = (input_np * 255).astype(np.uint8)
-            
             # Create figure
-            plt.figure(figsize=(15, 5))
+            plt.figure(figsize=(16, 6))
             
             plt.subplot(1, 3, 1)
             plt.title('Input RGB')
-            plt.imshow(input_np)
+            plt.imshow(rgb_np)
             plt.axis('off')
             
             plt.subplot(1, 3, 2)
@@ -204,11 +210,11 @@ def main():
     
     # Configuration
     config = {
-        'dataset_path': './data/nyu',
-        'batch_size': 8,
+        'dataset_path': '/projectnb/dl4ds/materials/datasets/monocular-depth-estimation/nyuv2/nyu_data',
+        'batch_size': 64,
         'num_workers': 4,
         'learning_rate': 1e-4,
-        'num_epochs': 10,
+        'num_epochs': 50,
         'input_size': (256, 256),
         'save_dir': './models',
     }
@@ -259,7 +265,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
     # Train the model
-    model = train_model(
+    model, train_losses, val_losses = train_model(
         model=model,
         dataloaders=dataloaders,
         criterion=criterion,
@@ -268,9 +274,23 @@ def main():
         num_epochs=config['num_epochs'],
         save_dir=config['save_dir']
     )
+
+    state_dict = torch.load('models/best_model.pth', map_location=device)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
     
     # Visualize results
     visualize_results(model, val_loader, device)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss Over Time')
+    plt.legend()
+    plt.savefig('loss_history.png')
+    plt.close()
 
 if __name__ == '__main__':
     main()

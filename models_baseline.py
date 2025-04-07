@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+import torch.nn.functional as F
 
 class SimpleUNet(nn.Module):
     def __init__(self, pretrained=True):
@@ -26,7 +27,7 @@ class SimpleUNet(nn.Module):
         self.decoder3 = self._make_decoder_block(128, 64)
         
         self.upconv2 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.decoder2 = self._make_decoder_block(64, 32)
+        self.decoder2 = self._make_decoder_block(96, 32)
         
         self.conv_final = nn.Conv2d(32, 1, kernel_size=1)
         self.sigmoid = nn.Sigmoid()
@@ -71,5 +72,5 @@ class SimpleUNet(nn.Module):
         
         out = self.conv_final(d2)
         out = self.sigmoid(out)
-        
+        out = F.interpolate(out, size=(256, 256), mode='bilinear', align_corners=True)
         return out
