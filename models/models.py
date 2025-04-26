@@ -70,7 +70,7 @@ class DepthEstimationStudent(nn.Module):
         # Decode and upsample with affinity maps
         affinity_outputs = []
         for i, (decoder_block, affinity_map) in enumerate(zip(self.decoder, self.affinity_maps)):
-            if i &lt; len(features):
+            if i < len(features):
                 # Add skip connection if available
                 x = x + features[len(features) - i - 1]
             x = decoder_block(x)
