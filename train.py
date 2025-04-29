@@ -14,6 +14,7 @@ import torchvision.models as models
 import cv2
 import pandas as pd
 from torch.quantization import quantize_dynamic
+from torch.cuda.amp import autocast, GradScaler
 from models import DepthEstimationStudent, DepthEstimationTeacher, CombinedLoss
 
 # Custom Dataset for NYU Depth V2
@@ -228,6 +229,8 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
     best_abs_rel = float('inf')
     best_epoch = 0
     
+    scaler = GradScaler()
+
     # Training history
     history = {
         'train_loss': [],
@@ -236,6 +239,8 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
         'rmse': [],
         'thresh_1': []
     }
+
+    torch.backends.cudnn.benchmark = True
     
     # Training loop
     for epoch in range(num_epochs):
@@ -263,27 +268,44 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
             # Zero gradients
             optimizer.zero_grad()
             
-            # Forward pass through student model
-            student_output = student_model(inputs)
+            # Use mixed precision for forward pass
+            with autocast():
+                # Forward pass through student model
+                student_output = student_model(inputs)
+                
+                # Get teacher output if using knowledge distillation
+                teacher_output = None
+                if use_teacher and teacher_model is not None:
+                    with torch.no_grad():
+                        teacher_output = teacher_model(inputs)
+                
+                # Calculate loss
+                loss, si_loss, grad_loss, distill_loss = criterion(student_output, targets, teacher_output, masks)
             
-            # Get teacher output if using knowledge distillation
-            teacher_output = None
-            if use_teacher and teacher_model is not None:
-                with torch.no_grad():
-                    teacher_output = teacher_model(inputs)
+            # Check if loss is valid
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: Invalid loss value: {loss.item()}, skipping batch")
+                continue
+                
+            # Backward pass and optimization with gradient scaling
+            scaler.scale(loss).backward()
             
-            # Calculate loss
-            loss, si_loss, grad_loss, distill_loss = criterion(student_output, targets, teacher_output, masks)
+            # Add gradient clipping to prevent exploding gradients (works with AMP)
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
             
-            # Backward pass and optimization
-            loss.backward()
-            optimizer.step()
+            # Step with scaler
+            scaler.step(optimizer)
+            scaler.update()
             
             # Update metrics
-            train_loss += loss.item()
-            si_loss_avg += si_loss.item()
-            grad_loss_avg += grad_loss.item()
-            distill_loss_avg += distill_loss.item() if distill_loss != 0 else 0
+            train_loss += loss.detach().item()
+            si_loss_avg += si_loss.detach().item()
+            grad_loss_avg += grad_loss.detach().item()
+            distill_loss_avg += distill_loss.detach().item() if distill_loss != 0 else 0
+
+            # del si_loss, grad_loss, distill_loss
+            # del student_output, teacher_output
             
             # Update progress bar description
             progress_bar.set_description(f"Training Epoch {epoch+1}, Loss: {loss.item():.4f}")
@@ -412,6 +434,8 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
         plt.savefig(f"{save_dir}/learning_curves.png")
         plt.close()
     
+        torch.cuda.empty_cache()
+        import gc; gc.collect()
     print(f"Training completed! Best model saved at epoch {best_epoch+1} with Abs Rel: {best_abs_rel:.4f}")
     return history
 
@@ -500,14 +524,14 @@ def main():
     np.random.seed(42)
     
     # Hyperparameters
-    batch_size = 8
+    batch_size = 16
     learning_rate = 1e-4
-    num_epochs = 30
+    num_epochs = 20
     input_size = (480, 640)  # Height, Width
     use_teacher = True  # Whether to use knowledge distillation
     
     # Dataset and dataloader
-    data_root = "./nyu_depth_v2"  # Path to NYU Depth V2 dataset
+    data_root = "/projectnb/dl4ds/materials/datasets/monocular-depth-estimation/nyuv2/nyu_data"  # Path to NYU Depth V2 dataset
     
     # Create transforms
     train_transform = Transforms(input_size=input_size, is_train=True)
@@ -518,8 +542,8 @@ def main():
     val_dataset = NYUDepthDataset(root_dir=data_root, transform=val_transform, is_train=False)
     
     # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
     
     # Check if GPU is available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -536,10 +560,10 @@ def main():
     
     # Create loss function
     criterion = CombinedLoss(
-        si_weight=1.0,
-        grad_weight=0.5,
-        distill_weight=1.0 if use_teacher else 0.0,
-        affinity_weight=0.5
+        si_weight=0.1,     # Reduced weight for scale-invariant loss
+        grad_weight=1.0,   # Increased gradient loss weight to focus on edges
+        distill_weight=0.2 if use_teacher else 0.0,  # Reduced distillation weight
+        affinity_weight=0.1  # Reduced affinity weight
     )
     
     # Create optimizer

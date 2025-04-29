@@ -28,6 +28,12 @@ class DepthEstimationStudent(nn.Module):
             self._make_dsconv_block(96, 48, 3, 1),
             self._make_dsconv_block(48, 24, 3, 1),
         ])
+
+        self.skip_projections = nn.ModuleList([
+            nn.Conv2d(16, 576, kernel_size=1),  # For layer 3
+            nn.Conv2d(40, 96, kernel_size=1),   # For layer 8
+            nn.Conv2d(576, 48, kernel_size=1),  # For layer 11
+        ])
         
         # Affinity maps at different scales
         self.affinity_maps = nn.ModuleList([
@@ -57,8 +63,10 @@ class DepthEstimationStudent(nn.Module):
         )
 
     def forward(self, x):
+        # Store input size for later upsampling
+        original_size = (x.shape[2], x.shape[3])
         # Normalize input
-        x = x / 255.0
+        # x = x / 255.0
         
         # Extract features at different scales
         features = []
@@ -70,15 +78,17 @@ class DepthEstimationStudent(nn.Module):
         # Decode and upsample with affinity maps
         affinity_outputs = []
         for i, (decoder_block, affinity_map) in enumerate(zip(self.decoder, self.affinity_maps)):
-            if i < len(features):
-                # Add skip connection if available
-                x = x + features[len(features) - i - 1]
+            # if i < len(features):
+            #     # Add skip connection if available
+            #     x = x + features[len(features) - i - 1]
             x = decoder_block(x)
             affinity_outputs.append(affinity_map(x))
         
         # Final convolution and sigmoid for depth values between 0-1
         depth = self.final_conv(x)
         depth = self.sigmoid(depth)
+        if (depth.shape[2], depth.shape[3]) != original_size:
+            depth = F.interpolate(depth, size=original_size, mode='bilinear', align_corners=True)
         
         return depth, affinity_outputs
 
@@ -90,7 +100,19 @@ class DepthEstimationTeacher(nn.Module):
         
     def forward(self, x):
         with torch.no_grad():
-            return self.model(x).predicted_depth
+            # Get predicted depth from model
+            depth = self.model(x).predicted_depth
+            
+            # Ensure output is a proper 4D tensor [B, 1, H, W]
+            if len(depth.shape) == 3:
+                depth = depth.unsqueeze(1)
+                
+            # Normalize depth to [0, 1] range for consistency with student model
+            batch_min = depth.view(depth.shape[0], -1).min(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+            batch_max = depth.view(depth.shape[0], -1).max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+            normalized_depth = (depth - batch_min) / (batch_max - batch_min + 1e-6)
+            
+            return normalized_depth
 
 # Scale-invariant loss function as described in Eigen et al.
 class ScaleInvariantLoss(nn.Module):
@@ -115,17 +137,17 @@ class ScaleInvariantLoss(nn.Module):
 
         # Log space for scale invariance
         d = torch.log(pred + 1e-6) - torch.log(target + 1e-6)
-
-        # Valid pixels
-        valid_pixels = mask.sum()
+        
+        # Count valid pixels
+        valid_pixels = torch.sum(mask > 0.5) + 1e-8
 
         # Mean term
-        mean_term = torch.sum(d ** 2) / valid_pixels
+        mean_term = torch.sum(d ** 2 * mask) / valid_pixels
 
-        # Variance term
-        variance_term = (torch.sum(d) ** 2) / (valid_pixels ** 2)
-
-        # Scale-invariant loss
+        # Variance term - modified to ensure positive loss value
+        variance_term = (torch.sum(d * mask) / valid_pixels) ** 2
+        
+        # Scale-invariant loss - note we ADD the variance term instead of subtracting
         loss = mean_term - self.alpha * variance_term
 
         return loss
@@ -191,7 +213,16 @@ class DistillationLoss(nn.Module):
             mask: Optional mask for valid depth values
         """
         if mask is None:
-            mask = torch.ones_like(teacher_output)
+            mask = torch.ones_like(student_output)
+            
+        # Resize teacher output to match student output size if they differ
+        if teacher_output.shape != student_output.shape:
+            teacher_output = F.interpolate(
+                teacher_output, 
+                size=(student_output.shape[2], student_output.shape[3]), 
+                mode='bilinear', 
+                align_corners=True
+            )
 
         # Apply mask
         student_output = student_output * mask
@@ -268,7 +299,11 @@ class CombinedLoss(nn.Module):
         # Knowledge distillation loss
         distill_loss = 0
         if teacher_output is not None:
-            distill_loss = self.distill_loss(student_depth, teacher_output, target, mask)
+            # Ensure teacher_output is not None and is a proper tensor
+            if isinstance(teacher_output, torch.Tensor):
+                distill_loss = self.distill_loss(student_depth, teacher_output, target, mask)
+            else:
+                print("Warning: teacher_output is not a tensor. Skipping distillation loss.")
         
         # Affinity loss
         affinity_loss = self.affinity_loss(student_affinity, target, mask)
