@@ -35,12 +35,12 @@ class DepthEstimationStudent(nn.Module):
             nn.Conv2d(576, 48, kernel_size=1),  # For layer 11
         ])
         
-        # Affinity maps at different scales
-        self.affinity_maps = nn.ModuleList([
-            nn.Conv2d(96, 1, kernel_size=1),
-            nn.Conv2d(48, 1, kernel_size=1),
-            nn.Conv2d(24, 1, kernel_size=1),
-        ])
+        # # Affinity maps at different scales
+        # self.affinity_maps = nn.ModuleList([
+        #     nn.Conv2d(96, 1, kernel_size=1),
+        #     nn.Conv2d(48, 1, kernel_size=1),
+        #     nn.Conv2d(24, 1, kernel_size=1),
+        # ])
         
         # Final output layer
         self.final_conv = nn.Conv2d(24, 1, kernel_size=3, stride=1, padding=1)
@@ -65,8 +65,6 @@ class DepthEstimationStudent(nn.Module):
     def forward(self, x):
         # Store input size for later upsampling
         original_size = (x.shape[2], x.shape[3])
-        # Normalize input
-        # x = x / 255.0
         
         # Extract features at different scales
         features = []
@@ -75,14 +73,13 @@ class DepthEstimationStudent(nn.Module):
             if i in [3, 8, 11]: # Save features from different scales for skip connections
                 features.append(x)
         
-        # Decode and upsample with affinity maps
-        affinity_outputs = []
-        for i, (decoder_block, affinity_map) in enumerate(zip(self.decoder, self.affinity_maps)):
+        # Decode and upsample (remove affinity maps collection)
+        for i, decoder_block in enumerate(self.decoder):
+            # Apply skip connections if needed
             # if i < len(features):
             #     # Add skip connection if available
             #     x = x + features[len(features) - i - 1]
             x = decoder_block(x)
-            affinity_outputs.append(affinity_map(x))
         
         # Final convolution and sigmoid for depth values between 0-1
         depth = self.final_conv(x)
@@ -90,7 +87,8 @@ class DepthEstimationStudent(nn.Module):
         if (depth.shape[2], depth.shape[3]) != original_size:
             depth = F.interpolate(depth, size=original_size, mode='bilinear', align_corners=True)
         
-        return depth, affinity_outputs
+        # Return only the depth output, no affinity maps
+        return depth
 
 # Define the Teacher Model - DepthAnything V2
 class DepthEstimationTeacher(nn.Module):
@@ -233,68 +231,75 @@ class DistillationLoss(nn.Module):
         
         return mse_loss
 
-# Pairwise Affinity Loss
-class AffinityLoss(nn.Module):
-    def __init__(self):
-        super(AffinityLoss, self).__init__()
+# # Pairwise Affinity Loss
+# class AffinityLoss(nn.Module):
+#     def __init__(self):
+#         super(AffinityLoss, self).__init__()
         
-    def forward(self, affinity_maps, target, mask=None):
-        """
-        Loss for affinity maps
-        Args:
-            affinity_maps: List of affinity maps from student
-            target: Ground truth depth map
-            mask: Optional mask for valid depth values
-        """
-        if mask is None:
-            mask = torch.ones_like(target)
+#     def forward(self, affinity_maps, target, mask=None):
+#         """
+#         Loss for affinity maps
+#         Args:
+#             affinity_maps: List of affinity maps from student
+#             target: Ground truth depth map
+#             mask: Optional mask for valid depth values
+#         """
+#         if mask is None:
+#             mask = torch.ones_like(target)
             
-        total_loss = 0
-        for aff_map in affinity_maps:
-            # Resize target to match affinity map size
-            resized_target = F.interpolate(target, size=aff_map.shape[2:], mode='bilinear', align_corners=True)
-            resized_mask = F.interpolate(mask, size=aff_map.shape[2:], mode='nearest')
+#         total_loss = 0
+#         for aff_map in affinity_maps:
+#             # Resize target to match affinity map size
+#             resized_target = F.interpolate(target, size=aff_map.shape[2:], mode='bilinear', align_corners=True)
+#             resized_mask = F.interpolate(mask, size=aff_map.shape[2:], mode='nearest')
             
-            # Apply mask
-            aff_map = aff_map * resized_mask
-            resized_target = resized_target * resized_mask
+#             # Apply mask
+#             aff_map = aff_map * resized_mask
+#             resized_target = resized_target * resized_mask
             
-            # MSE loss
-            loss = F.mse_loss(aff_map, resized_target, reduction='sum') / resized_mask.sum()
-            total_loss += loss
+#             # MSE loss
+#             loss = F.mse_loss(aff_map, resized_target, reduction='sum') / resized_mask.sum()
+#             total_loss += loss
             
-        return total_loss / len(affinity_maps)
+#         return total_loss / len(affinity_maps)
 
 # Combined loss function
 class CombinedLoss(nn.Module):
-    def __init__(self, si_weight=1.0, grad_weight=1.0, distill_weight=1.0, affinity_weight=0.5):
+    def __init__(self, si_weight=1.0, l1_weight=1.0, distill_weight=1.0):
         super(CombinedLoss, self).__init__()
         self.si_loss = ScaleInvariantLoss()
-        self.grad_loss = GradientMatchingLoss()
+        self.l1_loss = nn.L1Loss(reduction='mean')  # L1 loss instead of gradient loss
         self.distill_loss = DistillationLoss()
-        self.affinity_loss = AffinityLoss()
         self.si_weight = si_weight
-        self.grad_weight = grad_weight
+        self.l1_weight = l1_weight
         self.distill_weight = distill_weight
-        self.affinity_weight = affinity_weight
 
     def forward(self, student_output, target, teacher_output=None, mask=None):
         """
-        Combined loss function
+        Combined loss function based on the final presentation requirements
         Args:
-            student_output: Tuple of (depth, affinity_maps) from student
+            student_output: Depth prediction from student
             target: Ground truth depth map
             teacher_output: Output from the teacher model (optional)
             mask: Optional mask for valid depth values
         """
-        # Unpack student output
-        student_depth, student_affinity = student_output
+        # No need to unpack student output since it's now just the depth
+        student_depth = student_output
+        
+        # Apply mask if provided
+        if mask is not None:
+            student_depth = student_depth * mask
+            target = target * mask
         
         # Scale-invariant loss
         si_loss = self.si_loss(student_depth, target, mask)
         
-        # Gradient matching loss
-        grad_loss = self.grad_loss(student_depth, target, mask)
+        # L1 loss (replaced gradient loss)
+        if mask is not None:
+            # Apply mask and calculate mean over valid pixels
+            l1_loss = torch.sum(torch.abs(student_depth - target) * mask) / (torch.sum(mask) + 1e-8)
+        else:
+            l1_loss = self.l1_loss(student_depth, target)
         
         # Knowledge distillation loss
         distill_loss = 0
@@ -305,15 +310,13 @@ class CombinedLoss(nn.Module):
             else:
                 print("Warning: teacher_output is not a tensor. Skipping distillation loss.")
         
-        # Affinity loss
-        affinity_loss = self.affinity_loss(student_affinity, target, mask)
-        
-        # Combined loss
+        # Combined loss (removed affinity loss)
         total_loss = (
             self.si_weight * si_loss +
-            self.grad_weight * grad_loss +
-            self.distill_weight * distill_loss +
-            self.affinity_weight * affinity_loss
+            self.l1_weight * l1_loss +
+            self.distill_weight * distill_loss
         )
         
-        return total_loss, si_loss, grad_loss, distill_loss
+        return total_loss, si_loss, l1_loss, distill_loss
+
+

@@ -13,9 +13,11 @@ from tqdm import tqdm
 import torchvision.models as models
 import cv2
 import pandas as pd
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.quantization import quantize_dynamic
 from torch.cuda.amp import autocast, GradScaler
-from models import DepthEstimationStudent, DepthEstimationTeacher, CombinedLoss
+import torch.nn.parallel.data_parallel as DataParallel
+from models import DepthEstimationStudent, DepthEstimationTeacher, CombinedLoss, LightweightDepthModel, DepthLoss
 
 # Custom Dataset for NYU Depth V2
 class NYUDepthDataset(Dataset):
@@ -135,7 +137,7 @@ def visualize_predictions(student_model, dataloader, device, epoch, save_dir='./
     
     # Forward pass
     with torch.no_grad():
-        outputs, _ = student_model(inputs)
+        outputs = student_model(inputs)
     
     # Create visualization grid
     fig, axes = plt.subplots(num_samples, 3, figsize=(15, 5*num_samples))
@@ -270,7 +272,7 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
             
             # Use mixed precision for forward pass
             with autocast():
-                # Forward pass through student model
+                # Forward pass through student model (now returns only depth)
                 student_output = student_model(inputs)
                 
                 # Get teacher output if using knowledge distillation
@@ -280,7 +282,7 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
                         teacher_output = teacher_model(inputs)
                 
                 # Calculate loss
-                loss, si_loss, grad_loss, distill_loss = criterion(student_output, targets, teacher_output, masks)
+                loss, si_loss, l1_loss, distill_loss = criterion(student_output, targets, teacher_output, masks)
             
             # Check if loss is valid
             if torch.isnan(loss) or torch.isinf(loss):
@@ -301,7 +303,7 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
             # Update metrics
             train_loss += loss.detach().item()
             si_loss_avg += si_loss.detach().item()
-            grad_loss_avg += grad_loss.detach().item()
+            l1_loss_avg += l1_loss.detach().item()  # Changed from grad_loss_avg
             distill_loss_avg += distill_loss.detach().item() if distill_loss != 0 else 0
 
             # del si_loss, grad_loss, distill_loss
@@ -318,7 +320,7 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
         
         # Print training metrics
         print(f"Train Loss: {train_loss:.4f}, SI Loss: {si_loss_avg:.4f}, "
-              f"Grad Loss: {grad_loss_avg:.4f}, Distill Loss: {distill_loss_avg:.4f}")
+            f"L1 Loss: {l1_loss_avg:.4f}, Distill Loss: {distill_loss_avg:.4f}") 
         
         # Validation phase
         student_model.eval()
@@ -372,7 +374,7 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
             # Save best model checkpoint
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': student_model.state_dict(),
+                'model_state_dict': student_model.module.state_dict() if isinstance(student_model, torch.nn.DataParallel) else student_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'metrics': metrics_avg
@@ -383,7 +385,7 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
         # Save regular checkpoint
         torch.save({
             'epoch': epoch,
-            'model_state_dict': student_model.state_dict(),
+            'model_state_dict': student_model.module.state_dict() if isinstance(student_model, torch.nn.DataParallel) else student_model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_loss': val_loss,
             'metrics': metrics_avg
@@ -466,7 +468,7 @@ def evaluate_model(model, test_loader, device, save_dir='./results'):
             masks = batch['confidence'].to(device)
             
             # Forward pass
-            outputs, _ = model(inputs)
+            outputs = model(inputs)
             
             # Calculate metrics
             metrics = calculate_metrics(outputs, targets, masks)
@@ -504,7 +506,17 @@ def create_quantized_model(model_path, save_path):
     # Load the best model
     checkpoint = torch.load(model_path)
     model = DepthEstimationStudent(pretrained=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Handle both DataParallel and non-DataParallel state dicts
+    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
+        # Remove 'module.' prefix
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint['model_state_dict'].items():
+            name = k[7:] # remove 'module.'
+            new_state_dict[name] = v
+        model.load_state_dict(new_state_dict)
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
     
     # Quantize the model
     quantized_model = quantize_dynamic(
@@ -525,7 +537,7 @@ def main():
     
     # Hyperparameters
     batch_size = 16
-    learning_rate = 1e-4
+    learning_rate = 5e-5
     num_epochs = 20
     input_size = (480, 640)  # Height, Width
     use_teacher = True  # Whether to use knowledge distillation
@@ -552,26 +564,40 @@ def main():
     # Create models
     student_model = DepthEstimationStudent(pretrained=True)
     student_model = student_model.to(device)
-    
+    # if torch.cuda.device_count() > 1:
+    #     print(f"Using {torch.cuda.device_count()} GPUs for training!")
+    #     student_model = torch.nn.DataParallel(student_model)
+
     teacher_model = None
     if use_teacher:
         teacher_model = DepthEstimationTeacher()
         teacher_model = teacher_model.to(device)
+        # if torch.cuda.device_count() > 1:
+        #     teacher_model = torch.nn.DataParallel(teacher_model)
     
     # Create loss function
     criterion = CombinedLoss(
-        si_weight=0.1,     # Reduced weight for scale-invariant loss
-        grad_weight=1.0,   # Increased gradient loss weight to focus on edges
-        distill_weight=0.2 if use_teacher else 0.0,  # Reduced distillation weight
-        affinity_weight=0.1  # Reduced affinity weight
+        si_weight=1.0,     # Scale-invariant loss
+        l1_weight=1.0,     # L1 loss (replaced gradient loss)
+        distill_weight=0.5 if use_teacher else 0.0  # Knowledge distillation
     )
     
     # Create optimizer
     optimizer = optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=1e-5)
     
     # Create learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    # )
+    total_steps = len(train_loader) * num_epochs
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=learning_rate,
+        total_steps=total_steps,
+        pct_start=0.3,  # Spend 30% of training warming up
+        div_factor=25,  # Initial learning rate = max_lr/25
+        final_div_factor=10000,  # Final learning rate = max_lr/10000
+        anneal_strategy='cos'  # Use cosine annealing
     )
     
     # Create directory for results
