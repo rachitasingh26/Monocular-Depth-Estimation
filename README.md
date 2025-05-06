@@ -4,6 +4,12 @@ This project aims to develop a lightweight, efficient model for monocular depth 
 
 Implemented a knowledge distillation framework for efficient monocular depth estimation using a Teacher-Student paradigm. This approach enables deployment of accurate depth estimation models on resource-constrained devices while maintaining high-quality predictions.
 
+--------------------------
+To install all the dependencies required for the training, run the following command:
+```
+pip install -r requirements.txt
+```
+
 -------------------------
 
 #### Dataset Download:-
