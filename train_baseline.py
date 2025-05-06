@@ -125,7 +125,7 @@ def train_model(model, dataloaders, criterion, optimizer, device, num_epochs=10,
             
             
             # Iterate over data
-            for inputs, targets in tqdm(dataloaders[phase]):
+            for inputs, targets, _ in tqdm(dataloaders[phase]):
                 inputs = inputs.to(device)
                 targets = targets.to(device)
                 
@@ -214,7 +214,7 @@ def main():
         'batch_size': 64,
         'num_workers': 4,
         'learning_rate': 1e-4,
-        'num_epochs': 50,
+        'num_epochs': 70,
         'input_size': (256, 256),
         'save_dir': './models',
     }
