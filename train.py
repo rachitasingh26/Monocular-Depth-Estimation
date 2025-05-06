@@ -17,7 +17,9 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.quantization import quantize_dynamic
 from torch.cuda.amp import autocast, GradScaler
 import torch.nn.parallel.data_parallel as DataParallel
-from models import DepthEstimationStudent, DepthEstimationTeacher, CombinedLoss, LightweightDepthModel, DepthLoss
+from models import DepthEstimationStudent, DepthEstimationTeacher, CombinedLoss, LightweightDepthModel, DepthLoss, apply_pruning, remove_pruning, gradual_pruning, print_sparsity, compute_model_sparsity
+import torch.nn.utils.prune as prune
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 # Custom Dataset for NYU Depth V2
 class NYUDepthDataset(Dataset):
@@ -219,7 +221,8 @@ def calculate_metrics(pred, target, mask=None):
 # Training function
 def train_model(student_model, teacher_model, train_loader, val_loader, criterion, optimizer, 
                 scheduler, device, num_epochs=30, save_dir='./checkpoints', 
-                use_teacher=True, visualize_every=5):
+                use_teacher=True, visualize_every=5,
+                pruning_start_epoch=50, pruning_end_epoch=150, final_sparsity=0.5):
     """
     Training function for the depth estimation model
     """
@@ -239,7 +242,8 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
         'val_loss': [],
         'abs_rel': [],
         'rmse': [],
-        'thresh_1': []
+        'thresh_1': [],
+        'sparsity': []  # Add tracking for sparsity
     }
 
     torch.backends.cudnn.benchmark = True
@@ -247,6 +251,29 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
     # Training loop
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
+
+        if epoch >= pruning_start_epoch and epoch <= pruning_end_epoch:
+            # Calculate current sparsity using cubic schedule
+            progress = (epoch - pruning_start_epoch) / (pruning_end_epoch - pruning_start_epoch)
+            current_sparsity = 0.0 + (final_sparsity - 0.0) * (1.0 - (1.0 - progress) ** 3)
+            
+            print(f"Applying pruning with sparsity {current_sparsity:.4f}")
+            
+            # Remove any existing pruning
+            for name, module in student_model.named_modules():
+                if isinstance(module, (nn.Conv2d, nn.Linear)):
+                    if hasattr(module, 'weight_mask'):
+                        prune.remove(module, 'weight')
+            
+            # Apply new level of pruning
+            for name, module in student_model.named_modules():
+                if isinstance(module, (nn.Conv2d, nn.Linear)):
+                    prune.l1_unstructured(module, name='weight', amount=current_sparsity)
+            
+            # Record current sparsity
+            current_sparsity_actual = compute_model_sparsity(student_model)
+            history['sparsity'].append(current_sparsity_actual)
+            print(f"Current model sparsity: {current_sparsity_actual:.4f}")
         
         # Training phase
         student_model.train()
@@ -321,6 +348,9 @@ def train_model(student_model, teacher_model, train_loader, val_loader, criterio
         # Print training metrics
         print(f"Train Loss: {train_loss:.4f}, SI Loss: {si_loss_avg:.4f}, "
             f"L1 Loss: {l1_loss_avg:.4f}, Distill Loss: {distill_loss_avg:.4f}") 
+
+        if epoch % 30 == 0 or epoch >= pruning_start_epoch:
+            print_sparsity(student_model)
         
         # Validation phase
         student_model.eval()
