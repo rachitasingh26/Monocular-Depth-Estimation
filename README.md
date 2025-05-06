@@ -29,3 +29,4 @@ python3 inference.py --model_path /path/to/checkpoint --image_dir /path/to/image
 ```
 ---------------------------
 The results visualizations and checkpoints are automatically saved during training in the `results/visualizations` and `results` folders respectively.
+The `train_pruning.py`, `train_baseline.py`, `train_lightweight.py`, and `test.py` scripts were for our own testing and might throw errors if you try to run.
